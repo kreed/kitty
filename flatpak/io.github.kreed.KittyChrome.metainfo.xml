@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.kreed.KittyChrome</id>
+  <name>Kitty Chrome</name>
+  <summary>Kitty terminal with compact native GTK4 window chrome</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <description>
+    <p>
+      Kitty Chrome packages the Kitty terminal with native Wayland GTK4
+      decorations and a compact, auto-hiding titlebar.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.kreed.KittyChrome.desktop</launchable>
+  <provides>
+    <binary>kitty-chrome</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+</component>

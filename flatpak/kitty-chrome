@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+export KITTY_USE_LIBDECOR=1
+export LIBDECOR_PLUGIN_DIR=/app/lib/libdecor/plugins-1
+
+exec /app/bin/kitty -o linux_display_server=wayland "$@"
