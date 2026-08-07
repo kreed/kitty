@@ -30,3 +30,8 @@ __pycache__/
 bypy/b
 bypy/virtual-machines.conf
 _codeql_detected_source_root
+/.flatpak-builder/
+/_sources/
+/flatpak-build/
+/flatpak-repo/
+/*.flatpak
