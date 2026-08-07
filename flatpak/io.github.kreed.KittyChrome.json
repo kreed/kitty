@@ -77,7 +77,7 @@
       "name": "go-toolchain",
       "buildsystem": "simple",
       "build-commands": [
-        "cp -a go /app/go"
+        "cp -a . /app/go"
       ],
       "sources": [
         {
