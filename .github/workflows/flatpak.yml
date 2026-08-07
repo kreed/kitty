@@ -19,10 +19,10 @@ jobs:
 
     steps:
       - name: Check out Kitty
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Check out private libdecor fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: kreed/libdecor
           path: _sources/libdecor
