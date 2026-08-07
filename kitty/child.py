@@ -4,6 +4,7 @@
 import os
 import sys
 import termios
+from configparser import ConfigParser
 from collections import defaultdict
 from collections.abc import Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager, suppress
@@ -274,6 +275,45 @@ def process_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     return ans
 
 
+@run_once
+def flatpak_app_path() -> str:
+    try:
+        parser = ConfigParser()
+        with open('/.flatpak-info', encoding='utf-8') as f:
+            parser.read_file(f)
+        return parser.get('Instance', 'app-path', fallback='')
+    except OSError:
+        return ''
+
+
+def flatpak_host_argv(
+    argv: Sequence[str],
+    cwd: str,
+    env: Mapping[str, str],
+    pass_fds: Sequence[int],
+    app_path: str | None = None,
+) -> list[str]:
+    app_path = flatpak_app_path() if app_path is None else app_path
+
+    def host_path(value: str) -> str:
+        if app_path and (value == '/app' or value.startswith('/app/')):
+            return app_path + value[4:]
+        return value
+
+    ans = ['/usr/bin/flatpak-spawn', '--host', '--watch-bus', f'--directory={host_path(cwd)}']
+    sandbox_env = process_env()
+    for key, value in sorted(env.items()):
+        # Keep the host PATH so host-installed tools, including Nix profiles,
+        # remain discoverable. All other Kitty-specific changes are overlaid.
+        if key != 'PATH' and sandbox_env.get(key) != value:
+            ans.append(f'--env={key}={host_path(value)}')
+    for fd in pass_fds:
+        if fd > -1:
+            ans.append(f'--forward-fd={fd}')
+    ans.extend(host_path(arg) for arg in argv)
+    return ans
+
+
 def default_env() -> dict[str, str]:
     ans: dict[str, str] | None = getattr(default_env, 'env', None)
     if ans is None:
@@ -488,11 +528,15 @@ class Child:
                     argv.append('--cwd=' + cwd)
                     cwd = os.path.expanduser('~')
                 argv = ['/usr/bin/login', '-f', '-l', '-p', user] + argv
-        self.final_exe = final_exe = which(argv[0]) or argv[0]
         self.final_argv0 = argv[0]
         if self.hold:
             argv = cmdline_for_hold(argv)
+        if os.path.exists('/.flatpak-info'):
+            argv = flatpak_host_argv(argv, cwd, self.final_env, pass_fds)
             final_exe = argv[0]
+        else:
+            final_exe = which(argv[0]) or argv[0]
+        self.final_exe = final_exe
         env = tuple(f'{k}={v}' for k, v in self.final_env.items())
         pid = fast_data_types.spawn(
             final_exe,
@@ -520,7 +564,7 @@ class Child:
         self.terminal_ready_fd = ready_write_fd
         if self.child_fd is not None:
             os.set_blocking(self.child_fd, False)
-        if not is_macos:
+        if not is_macos and not os.path.exists('/.flatpak-info'):
             ppid = getpid()
             try:
                 fast_data_types.systemd_move_pid_into_new_scope(pid, f'kitty-{ppid}-{self.id}.scope', f'kitty child process: {pid} launched by: {ppid}')

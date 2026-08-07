@@ -4,4 +4,20 @@ set -eu
 export KITTY_USE_LIBDECOR=1
 export LIBDECOR_PLUGIN_DIR=/app/lib/libdecor/plugins-1
 
+host_theme=$(flatpak-spawn --host gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null || :)
+host_theme=${host_theme#\'}
+host_theme=${host_theme%\'}
+for theme_dir in \
+    "$HOME/.themes/$host_theme" \
+    "$HOME/.local/share/themes/$host_theme" \
+    "/run/host/usr/local/share/themes/$host_theme" \
+    "/run/host/usr/share/themes/$host_theme"
+do
+    if [ -f "$theme_dir/gtk-4.0/gtk.css" ]; then
+        export GTK_THEME=$host_theme
+        export XDG_DATA_DIRS="/run/host/usr/local/share:/run/host/usr/share:${XDG_DATA_DIRS:-/app/share:/usr/share}"
+        break
+    fi
+done
+
 exec /app/bin/kitty -o linux_display_server=wayland "$@"

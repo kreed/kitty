@@ -4,13 +4,42 @@
 import os
 import subprocess
 
-from kitty.child import memory_used_by_process_tree_rooted_at
+from kitty.child import flatpak_host_argv, memory_used_by_process_tree_rooted_at
 from kitty.constants import is_macos, kitty_exe
 
 from .base import BaseTest
 
 
 class ChildMemoryTest(BaseTest):
+    def test_flatpak_host_argv(self):
+        env = dict(os.environ)
+        env.update(
+            PATH='/app/bin:/usr/bin',
+            KITTY_TEST_HOST_BRIDGE='1',
+            KITTY_INSTALLATION_DIR='/app/lib/kitty',
+        )
+        argv = flatpak_host_argv(
+            ['/bin/bash', '-l'],
+            '/home/user',
+            env,
+            (9,),
+            app_path='/var/lib/flatpak/app/kitty/files',
+        )
+        self.assertEqual(argv[:4], [
+            '/usr/bin/flatpak-spawn',
+            '--host',
+            '--watch-bus',
+            '--directory=/home/user',
+        ])
+        self.assertNotIn('--env=PATH=/app/bin:/usr/bin', argv)
+        self.assertIn('--env=KITTY_TEST_HOST_BRIDGE=1', argv)
+        self.assertIn(
+            '--env=KITTY_INSTALLATION_DIR=/var/lib/flatpak/app/kitty/files/lib/kitty',
+            argv,
+        )
+        self.assertIn('--forward-fd=9', argv)
+        self.assertEqual(argv[-2:], ['/bin/bash', '-l'])
+
     def _spawn_allocating_child(self, alloc_bytes: int) -> subprocess.Popen:
         p = subprocess.Popen(
             [
