@@ -777,6 +777,76 @@ glfwWaylandMissingCapabilities(void) {
     return get_compositor_missing_capabilities();
 }
 
+static void
+libdecorHandleError(struct libdecor *context UNUSED, enum libdecor_error error, const char *message) {
+    _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: libdecor error %u: %s", error, message);
+}
+
+static const struct libdecor_interface libdecorInterface = {
+    .error = libdecorHandleError,
+};
+
+static void
+dispatch_libdecor_events(int fd UNUSED, int events UNUSED, void *data UNUSED) {
+    if (_glfw.wl.libdecor.context && libdecor_dispatch(_glfw.wl.libdecor.context, 0) < 0)
+        _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: libdecor event dispatch failed");
+}
+
+static bool
+load_libdecor(void) {
+    const char *enabled = getenv("KITTY_USE_LIBDECOR");
+    if (!enabled || !enabled[0] || strcmp(enabled, "0") == 0) return true;
+
+    _glfw.wl.libdecor.handle = _glfw_dlopen("libdecor-0.so.0");
+    if (!_glfw.wl.libdecor.handle) {
+        _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: KITTY_USE_LIBDECOR is set but libdecor-0.so.0 could not be loaded");
+        return true;
+    }
+
+#define LOAD(name) glfw_dlsym(_glfw.wl.libdecor.name, _glfw.wl.libdecor.handle, "libdecor_" #name)
+    LOAD(new);
+    LOAD(unref);
+    LOAD(get_fd);
+    LOAD(dispatch);
+    LOAD(decorate);
+    LOAD(frame_unref);
+    LOAD(frame_set_app_id);
+    LOAD(frame_set_title);
+    LOAD(frame_set_minimized);
+    LOAD(frame_set_fullscreen);
+    LOAD(frame_unset_fullscreen);
+    LOAD(frame_map);
+    LOAD(frame_commit);
+    LOAD(frame_set_min_content_size);
+    LOAD(frame_set_max_content_size);
+    LOAD(frame_set_maximized);
+    LOAD(frame_unset_maximized);
+    LOAD(frame_unset_capabilities);
+    LOAD(frame_set_visibility);
+    LOAD(frame_is_visible);
+    LOAD(frame_get_xdg_toplevel);
+    LOAD(configuration_get_content_size);
+    LOAD(configuration_get_window_state);
+    LOAD(state_new);
+    LOAD(state_free);
+#undef LOAD
+
+#define REQUIRED(name) _glfw.wl.libdecor.name &&
+    if (!(REQUIRED(new) REQUIRED(unref) REQUIRED(get_fd) REQUIRED(dispatch) REQUIRED(decorate) REQUIRED(frame_unref)
+          REQUIRED(frame_set_app_id) REQUIRED(frame_set_title) REQUIRED(frame_set_minimized) REQUIRED(frame_set_fullscreen)
+              REQUIRED(frame_unset_fullscreen) REQUIRED(frame_map) REQUIRED(frame_commit) REQUIRED(frame_set_min_content_size)
+                  REQUIRED(frame_set_max_content_size) REQUIRED(frame_set_maximized) REQUIRED(frame_unset_maximized)
+                      REQUIRED(frame_unset_capabilities) REQUIRED(frame_set_visibility) REQUIRED(frame_is_visible)
+                          REQUIRED(frame_get_xdg_toplevel) REQUIRED(configuration_get_content_size)
+                              REQUIRED(configuration_get_window_state) REQUIRED(state_new) _glfw.wl.libdecor.state_free)) {
+        _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: libdecor is missing required entry points; using Kitty decorations");
+        _glfw_dlclose(_glfw.wl.libdecor.handle);
+        memset(&_glfw.wl.libdecor, 0, sizeof(_glfw.wl.libdecor));
+    }
+#undef REQUIRED
+    return true;
+}
+
 int
 _glfwPlatformInit(bool *supports_window_occlusion) {
     int i;
@@ -811,6 +881,7 @@ _glfwPlatformInit(bool *supports_window_occlusion) {
     if (!initPollData(&_glfw.wl.eventLoopData, wl_display_get_fd(_glfw.wl.display))) {
         _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: Failed to initialize event loop data");
     }
+    load_libdecor();
     glfw_dbus_init(&_glfw.wl.dbus, &_glfw.wl.eventLoopData);
     glfw_initialize_desktop_settings();
 #ifndef HAS_TIMER_FD
@@ -831,6 +902,19 @@ _glfwPlatformInit(bool *supports_window_occlusion) {
 
     // Sync so we got all initial output events
     wl_display_roundtrip(_glfw.wl.display);
+
+    if (_glfw.wl.libdecor.handle) {
+        _glfw.wl.libdecor.context = libdecor_new(_glfw.wl.display, &libdecorInterface);
+        if (_glfw.wl.libdecor.context) {
+            libdecor_dispatch(_glfw.wl.libdecor.context, 0);
+            const int fd = libdecor_get_fd(_glfw.wl.libdecor.context);
+            if (fd >= 0 && fd != wl_display_get_fd(_glfw.wl.display))
+                _glfw.wl.libdecor.watch_id =
+                    addWatch(&_glfw.wl.eventLoopData, "libdecor", fd, POLLIN | POLLERR | POLLHUP, true, dispatch_libdecor_events, NULL);
+        } else {
+            _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: Failed to initialize libdecor; using Kitty decorations");
+        }
+    }
 
     for (i = 0; i < _glfw.monitorCount; ++i) {
         monitor = _glfw.monitors[i];
@@ -872,6 +956,15 @@ _glfwPlatformTerminate(void) {
         free(_glfw.wl.activation_requests.array);
     }
     _glfwTerminateEGL();
+    if (_glfw.wl.libdecor.watch_id) removeWatch(&_glfw.wl.eventLoopData, _glfw.wl.libdecor.watch_id);
+    if (_glfw.wl.libdecor.context) {
+        libdecor_unref(_glfw.wl.libdecor.context);
+        _glfw.wl.libdecor.context = NULL;
+    }
+    if (_glfw.wl.libdecor.handle) {
+        _glfw_dlclose(_glfw.wl.libdecor.handle);
+        _glfw.wl.libdecor.handle = NULL;
+    }
     if (_glfw.wl.egl.handle) {
         _glfw_dlclose(_glfw.wl.egl.handle);
         _glfw.wl.egl.handle = NULL;
