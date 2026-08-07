@@ -121,6 +121,7 @@
       },
       "build-commands": [
         "mkdir -p fonts",
+        "mkdir -p docs/_build/html docs/_build/man",
         "cp flatpak-sources/nerd-fonts/SymbolsNerdFontMono-Regular.ttf fonts/",
         "python3 setup.py linux-package --prefix=/app --update-check-interval=0 --shell-integration='enabled no-rc'",
         "install -Dm755 flatpak/kitty-chrome /app/bin/kitty-chrome",
