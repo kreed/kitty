@@ -112,12 +112,9 @@
       "name": "kitty-chrome",
       "buildsystem": "simple",
       "build-options": {
-        "build-args": [
-          "--share=network"
-        ],
         "env": {
+          "GOFLAGS": "-mod=vendor",
           "GOTOOLCHAIN": "local",
-          "GOPROXY": "https://proxy.golang.org,direct",
           "LD_LIBRARY_PATH": "/app/lib",
           "PATH": "/app/go/bin:/app/bin:/usr/bin"
         }
@@ -140,6 +137,7 @@
           "type": "dir",
           "path": ".."
         },
+        "kitty.go.mod.json",
         {
           "type": "archive",
           "url": "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.0/NerdFontsSymbolsOnly.tar.xz",
