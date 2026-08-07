@@ -94,8 +94,8 @@
       "name": "slang-toolchain",
       "buildsystem": "simple",
       "build-commands": [
-        "cp -a bin/* /app/bin/",
-        "cp -a lib/* /app/lib/"
+        "cp -a slang slangc slangd slangi /app/bin/",
+        "cp -a lib*.so* /app/lib/"
       ],
       "sources": [
         {
