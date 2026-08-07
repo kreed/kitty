@@ -120,6 +120,12 @@ enum libdecor_window_state {
     LIBDECOR_WINDOW_STATE_TILED_RIGHT = 16,
     LIBDECOR_WINDOW_STATE_TILED_TOP = 32,
     LIBDECOR_WINDOW_STATE_TILED_BOTTOM = 64,
+    LIBDECOR_WINDOW_STATE_SUSPENDED = 128,
+    LIBDECOR_WINDOW_STATE_RESIZING = 256,
+    LIBDECOR_WINDOW_STATE_CONSTRAINED_LEFT = 512,
+    LIBDECOR_WINDOW_STATE_CONSTRAINED_RIGHT = 1024,
+    LIBDECOR_WINDOW_STATE_CONSTRAINED_TOP = 2048,
+    LIBDECOR_WINDOW_STATE_CONSTRAINED_BOTTOM = 4096,
 };
 
 enum libdecor_capabilities {
@@ -183,6 +189,7 @@ typedef void (*PFN_libdecor_frame_unset_capabilities)(struct libdecor_frame *, e
 typedef void (*PFN_libdecor_frame_set_visibility)(struct libdecor_frame *, bool);
 typedef bool (*PFN_libdecor_frame_is_visible)(struct libdecor_frame *);
 typedef struct xdg_toplevel *(*PFN_libdecor_frame_get_xdg_toplevel)(struct libdecor_frame *);
+typedef void (*PFN_libdecor_frame_reveal_titlebar)(struct libdecor_frame *);
 typedef bool (*PFN_libdecor_configuration_get_content_size)(
     struct libdecor_configuration *, struct libdecor_frame *, int *, int *);
 typedef bool (*PFN_libdecor_configuration_get_window_state)(
@@ -211,6 +218,7 @@ typedef void (*PFN_libdecor_state_free)(struct libdecor_state *);
 #define libdecor_frame_set_visibility _glfw.wl.libdecor.frame_set_visibility
 #define libdecor_frame_is_visible _glfw.wl.libdecor.frame_is_visible
 #define libdecor_frame_get_xdg_toplevel _glfw.wl.libdecor.frame_get_xdg_toplevel
+#define libdecor_frame_reveal_titlebar _glfw.wl.libdecor.frame_reveal_titlebar
 #define libdecor_configuration_get_content_size _glfw.wl.libdecor.configuration_get_content_size
 #define libdecor_configuration_get_window_state _glfw.wl.libdecor.configuration_get_window_state
 #define libdecor_state_new _glfw.wl.libdecor.state_new
@@ -561,6 +569,7 @@ typedef struct _GLFWlibraryWayland {
         PFN_libdecor_frame_set_visibility frame_set_visibility;
         PFN_libdecor_frame_is_visible frame_is_visible;
         PFN_libdecor_frame_get_xdg_toplevel frame_get_xdg_toplevel;
+        PFN_libdecor_frame_reveal_titlebar frame_reveal_titlebar;
         PFN_libdecor_configuration_get_content_size configuration_get_content_size;
         PFN_libdecor_configuration_get_window_state configuration_get_window_state;
         PFN_libdecor_state_new state_new;

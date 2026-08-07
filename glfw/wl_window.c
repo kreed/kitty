@@ -1037,6 +1037,12 @@ libdecorFrameHandleConfigure(struct libdecor_frame *frame, struct libdecor_confi
         if (state & LIBDECOR_WINDOW_STATE_TILED_RIGHT) new_states |= TOPLEVEL_STATE_TILED_RIGHT;
         if (state & LIBDECOR_WINDOW_STATE_TILED_TOP) new_states |= TOPLEVEL_STATE_TILED_TOP;
         if (state & LIBDECOR_WINDOW_STATE_TILED_BOTTOM) new_states |= TOPLEVEL_STATE_TILED_BOTTOM;
+        if (state & LIBDECOR_WINDOW_STATE_SUSPENDED) new_states |= TOPLEVEL_STATE_SUSPENDED;
+        if (state & LIBDECOR_WINDOW_STATE_RESIZING) new_states |= TOPLEVEL_STATE_RESIZING;
+        if (state & LIBDECOR_WINDOW_STATE_CONSTRAINED_LEFT) new_states |= TOPLEVEL_STATE_CONSTRAINED_LEFT;
+        if (state & LIBDECOR_WINDOW_STATE_CONSTRAINED_RIGHT) new_states |= TOPLEVEL_STATE_CONSTRAINED_RIGHT;
+        if (state & LIBDECOR_WINDOW_STATE_CONSTRAINED_TOP) new_states |= TOPLEVEL_STATE_CONSTRAINED_TOP;
+        if (state & LIBDECOR_WINDOW_STATE_CONSTRAINED_BOTTOM) new_states |= TOPLEVEL_STATE_CONSTRAINED_BOTTOM;
     } else {
         new_states = window->wl.current.toplevel_states;
     }

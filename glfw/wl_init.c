@@ -78,6 +78,12 @@ get_window_from_surface(struct wl_surface *surface) {
 }
 
 static void
+reveal_libdecor_titlebar_at_top_edge(_GLFWwindow *window) {
+    if (window->wl.libdecor_frame && window->wl.allCursorPosY <= 2)
+        libdecor_frame_reveal_titlebar(window->wl.libdecor_frame);
+}
+
+static void
 pointerHandleEnter(void *data UNUSED, struct wl_pointer *pointer UNUSED, uint32_t serial, struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy) {
     _GLFWwindow *window = get_window_from_surface(surface);
     if (!window) return;
@@ -95,6 +101,7 @@ pointerHandleEnter(void *data UNUSED, struct wl_pointer *pointer UNUSED, uint32_
         window->wl.hovered = true;
         window->wl.cursorPosX = x;
         window->wl.cursorPosY = y;
+        reveal_libdecor_titlebar_at_top_edge(window);
         _glfwPlatformSetCursor(window, window->wl.currentCursor);
         _glfwInputCursorEnter(window, true);
     }
@@ -132,6 +139,7 @@ pointerHandleMotion(void *data UNUSED, struct wl_pointer *pointer UNUSED, uint32
     } else {
         window->wl.cursorPosX = x;
         window->wl.cursorPosY = y;
+        reveal_libdecor_titlebar_at_top_edge(window);
         _glfwInputCursorPos(window, x, y);
         _glfw.wl.cursorPreviousShape = GLFW_INVALID_CURSOR;
     }
@@ -825,6 +833,7 @@ load_libdecor(void) {
     LOAD(frame_set_visibility);
     LOAD(frame_is_visible);
     LOAD(frame_get_xdg_toplevel);
+    LOAD(frame_reveal_titlebar);
     LOAD(configuration_get_content_size);
     LOAD(configuration_get_window_state);
     LOAD(state_new);
@@ -837,7 +846,8 @@ load_libdecor(void) {
               REQUIRED(frame_unset_fullscreen) REQUIRED(frame_map) REQUIRED(frame_commit) REQUIRED(frame_set_min_content_size)
                   REQUIRED(frame_set_max_content_size) REQUIRED(frame_set_maximized) REQUIRED(frame_unset_maximized)
                       REQUIRED(frame_unset_capabilities) REQUIRED(frame_set_visibility) REQUIRED(frame_is_visible)
-                          REQUIRED(frame_get_xdg_toplevel) REQUIRED(configuration_get_content_size)
+                          REQUIRED(frame_get_xdg_toplevel) REQUIRED(frame_reveal_titlebar)
+                              REQUIRED(configuration_get_content_size)
                               REQUIRED(configuration_get_window_state) REQUIRED(state_new) _glfw.wl.libdecor.state_free)) {
         _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: libdecor is missing required entry points; using Kitty decorations");
         _glfw_dlclose(_glfw.wl.libdecor.handle);
