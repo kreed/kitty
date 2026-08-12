@@ -1,0 +1,21 @@
+#!/bin/sh
+if [ "${1:-}" = exec ]; then
+    shift
+    # The host PTY path supplies the terminal itself, so these are dropped, but
+    # they have to be replayed if we fall back to running podman directly.
+    tty_flags=
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -i|-t|-it|-ti|--interactive|--tty) tty_flags="$tty_flags $1"; shift ;;
+            --) shift; break ;;
+            -*) exec flatpak-spawn --host podman exec $tty_flags "$@" ;;
+            *) break ;;
+        esac
+    done
+    if [ "$#" -gt 0 ]; then
+        container=$1
+        shift
+        exec /app/libexec/kitty-chrome-host-pty podman "$container" -- "$@"
+    fi
+fi
+exec flatpak-spawn --host podman "$@"

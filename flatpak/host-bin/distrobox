@@ -1,0 +1,5 @@
+#!/bin/sh
+if [ "${1:-}" = enter ] && [ -n "${2:-}" ]; then
+    exec /app/libexec/kitty-chrome-host-pty distrobox "$2"
+fi
+exec flatpak-spawn --host distrobox "$@"

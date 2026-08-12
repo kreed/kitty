@@ -1,0 +1,38 @@
+diff --git a/meson.build b/meson.build
+index f8e79ba..2531f18 100644
+--- a/meson.build
++++ b/meson.build
+@@ -185,6 +185,8 @@
+-subdir('data')
+ subdir('agent')
+-subdir('src')
+-subdir('po')
+-subdir('man')
+-subdir('testsuite')
++if not get_option('agent-only')
++  subdir('data')
++  subdir('src')
++  subdir('po')
++  subdir('man')
++  subdir('testsuite')
++endif
+@@ -194,5 +196,7 @@
+-gnome.post_install(
+-     glib_compile_schemas: true,
+-    gtk_update_icon_cache: true,
+-  update_desktop_database: true,
+-)
++if not get_option('agent-only')
++  gnome.post_install(
++       glib_compile_schemas: true,
++      gtk_update_icon_cache: true,
++    update_desktop_database: true,
++  )
++endif
+diff --git a/meson_options.txt b/meson_options.txt
+index 6503efd..e226f46 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -12,1 +12,2 @@
+ option('libc-compat', type: 'boolean', value: false, description: 'Try to build the agent with old glibc symbols for running on older hosts')
++option('agent-only', type: 'boolean', value: false, description: 'Build only the host terminal agent')

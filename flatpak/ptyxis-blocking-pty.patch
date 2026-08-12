@@ -1,0 +1,25 @@
+The producer descriptor becomes the terminal child's stdin, stdout and
+stderr, and it is opened with O_NONBLOCK. Nothing clears the flag before
+the child is executed, so children start with non-blocking stdio and reads
+that would block fail with EAGAIN instead, which nothing expects from a
+tty: a shell read loop treats the error as end of input and exits at once,
+cat exits without reading anything, and zellij panics out of its stdin
+thread. Programs that reset the flag themselves hide the problem, so a
+long lived session can look healthy while a fresh one dies during startup.
+
+Open the producer blocking instead. kitty drives the other end of the pty,
+which is unaffected.
+
+diff --git a/agent/ptyxis-agent-util.c b/agent/ptyxis-agent-util.c
+index e3cf4a5..b8225e5 100644
+--- a/agent/ptyxis-agent-util.c
++++ b/agent/ptyxis-agent-util.c
+@@ -228,7 +228,7 @@ ptyxis_agent_pty_new_producer (int      consumer_fd,
+ {
+   int fd;
+
+-  if (-1 == (fd = ptyxis_pty_create_producer (consumer_fd, FALSE)))
++  if (-1 == (fd = ptyxis_pty_create_producer (consumer_fd, TRUE)))
+     {
+       int errsv = errno;
+       g_set_error_literal (error,

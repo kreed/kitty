@@ -95,7 +95,9 @@ pointerHandleEnter(void *data UNUSED, struct wl_pointer *pointer UNUSED, uint32_
         window->wl.hovered = true;
         window->wl.cursorPosX = x;
         window->wl.cursorPosY = y;
-        _glfwPlatformSetCursor(window, window->wl.currentCursor);
+        if (csd_update_titlebar_reveal(window, x, y)) commit_window_surface_if_safe(window);
+        if (csd_top_edge_contains(window, x, y)) csd_top_edge_set_cursor(window);
+        else _glfwPlatformSetCursor(window, window->wl.currentCursor);
         _glfwInputCursorEnter(window, true);
     }
 }
@@ -116,6 +118,7 @@ pointerHandleLeave(void *data UNUSED, struct wl_pointer *pointer UNUSED, uint32_
     _glfw.wl.pointerFocus = NULL;
     if (window->wl.surface == surface) {
         window->wl.hovered = false;
+        if (csd_handle_pointer_left_window(window, window->wl.allCursorPosX, window->wl.allCursorPosY)) commit_window_surface_if_safe(window);
         _glfwInputCursorEnter(window, false);
         _glfw.wl.cursorPreviousShape = GLFW_INVALID_CURSOR;
     } else csd_handle_pointer_event(window, -3, -3, surface);
@@ -132,8 +135,12 @@ pointerHandleMotion(void *data UNUSED, struct wl_pointer *pointer UNUSED, uint32
     } else {
         window->wl.cursorPosX = x;
         window->wl.cursorPosY = y;
+        if (csd_update_titlebar_reveal(window, x, y)) commit_window_surface_if_safe(window);
         _glfwInputCursorPos(window, x, y);
-        _glfw.wl.cursorPreviousShape = GLFW_INVALID_CURSOR;
+        // The top edge keeps its grab cursor; elsewhere the shape is invalidated
+        // so the application can set its own.
+        if (csd_top_edge_contains(window, x, y)) csd_top_edge_set_cursor(window);
+        else _glfw.wl.cursorPreviousShape = GLFW_INVALID_CURSOR;
     }
 }
 
@@ -153,6 +160,7 @@ pointerHandleButton(void *data UNUSED, struct wl_pointer *pointer UNUSED, uint32
         csd_handle_pointer_event(window, button, state, NULL);
         return;
     }
+    if (csd_top_edge_contains(window, window->wl.allCursorPosX, window->wl.allCursorPosY) && csd_top_edge_start_move(window, button, state)) return;
     /* Makes left, right and middle 0, 1 and 2. Overall order follows evdev
      * codes. */
     int glfwButton = button - BTN_LEFT;
