@@ -220,7 +220,7 @@ commit_window_surface(_GLFWwindow *window) {
     wl_surface_commit(window->wl.surface);
 }
 
-static void
+void
 commit_window_surface_if_safe(_GLFWwindow *window) {
     // we only commit if the buffer attached to the surface is the correct size,
     // which means that at least one frame is drawn after resizeFramebuffer()

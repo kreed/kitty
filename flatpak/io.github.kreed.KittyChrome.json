@@ -1,0 +1,166 @@
+{
+  "app-id": "io.github.kreed.KittyChrome",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "50",
+  "sdk": "org.gnome.Sdk",
+  "command": "kitty-chrome",
+  "finish-args": [
+    "--allow=devel",
+    "--device=dri",
+    "--filesystem=host",
+    "--filesystem=xdg-run/zellij",
+    "--share=ipc",
+    "--share=network",
+    "--socket=fallback-x11",
+    "--socket=wayland",
+    "--talk-name=org.freedesktop.Flatpak"
+  ],
+  "cleanup": [
+    "/include",
+    "/lib/cmake",
+    "/lib/pkgconfig",
+    "/share/doc",
+    "/share/gtk-doc",
+    "/share/man",
+    "/share/pkgconfig",
+    "*.a",
+    "*.la"
+  ],
+  "modules": [
+    {
+      "name": "xxhash",
+      "buildsystem": "simple",
+      "build-commands": [
+        "make -j${FLATPAK_BUILDER_N_JOBS}",
+        "make PREFIX=/app install"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/Cyan4973/xxHash.git",
+          "commit": "e626a72bc2321cd320e953a0ccf1584cad60f363"
+        }
+      ]
+    },
+    {
+      "name": "simde",
+      "buildsystem": "meson",
+      "config-opts": [
+        "-Dtests=false"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/simd-everywhere/simde.git",
+          "commit": "71fd833d9666141edcd1d3c109a80e228303d8d7"
+        }
+      ]
+    },
+    {
+      "name": "go-toolchain",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cp -a . /app/go"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://go.dev/dl/go1.26.5.linux-amd64.tar.gz",
+          "sha256": "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053",
+          "only-arches": [
+            "x86_64"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "slang-toolchain",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cp -a slang slangc slangd slangi /app/bin/",
+        "cp -a lib*.so* /app/lib/"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://github.com/shader-slang/slang/releases/download/v2026.14.1/slang-2026.14.1-linux-x86_64-glibc-2.27.tar.gz",
+          "sha256": "427d9985aac9e88912429bf9e7c1a3543bf35a61aaa855c890eeb96920175e0c",
+          "only-arches": [
+            "x86_64"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ptyxis-agent",
+      "buildsystem": "simple",
+      "build-commands": [
+        "meson setup _build --prefix=/app --libexecdir=libexec --buildtype=release -Dagent-only=true -Dlibc-compat=true",
+        "ninja -C _build agent/ptyxis-agent",
+        "install -Dm755 _build/agent/ptyxis-agent /app/libexec/ptyxis-agent"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://gitlab.gnome.org/chergert/ptyxis.git",
+          "commit": "2ec6763f8ff9e2e207657f99cd96687ea67f07ed"
+        },
+        {
+          "type": "patch",
+          "path": "ptyxis-agent-only.patch"
+        },
+        {
+          "type": "patch",
+          "path": "ptyxis-blocking-pty.patch"
+        }
+      ]
+    },
+    {
+      "name": "kitty-chrome",
+      "buildsystem": "simple",
+      "build-options": {
+        "build-args": [
+          "--share=network"
+        ],
+        "env": {
+          "GOTOOLCHAIN": "local",
+          "LD_LIBRARY_PATH": "/app/lib",
+          "PATH": "/app/go/bin:/app/bin:/usr/bin"
+        }
+      },
+      "build-commands": [
+        "mkdir -p fonts",
+        "mkdir -p docs/_build/html docs/_build/man",
+        "cp flatpak-sources/nerd-fonts/SymbolsNerdFontMono-Regular.ttf fonts/",
+        "python3 setup.py linux-package --prefix=/app --update-check-interval=0 --shell-integration='enabled no-rc'",
+        "install -Dm755 flatpak/kitty-chrome /app/bin/kitty-chrome",
+        "cc -std=gnu11 -O2 flatpak/host-agent.c $(pkg-config --cflags --libs gio-2.0 gio-unix-2.0) -o /app/libexec/kitty-host-agent",
+        "cc -std=gnu11 -O2 flatpak/host-bridge.c $(pkg-config --cflags --libs gio-2.0 gio-unix-2.0) -o /app/libexec/kitty-chrome-host-pty",
+        "install -Dm755 flatpak/host-bin/wssh /app/bin/wssh",
+        "install -Dm755 flatpak/host-bin/podman /app/bin/podman",
+        "install -Dm755 flatpak/host-bin/distrobox /app/bin/distrobox",
+        "install -Dm755 flatpak/host-bin/toolbox /app/bin/toolbox",
+        "sed -i 's/^TryExec=kitty$/TryExec=kitty-chrome/; s/^Exec=kitty$/Exec=kitty-chrome/; s/^Icon=kitty$/Icon=io.github.kreed.KittyChrome/' /app/share/applications/kitty.desktop",
+        "mv /app/share/applications/kitty.desktop /app/share/applications/io.github.kreed.KittyChrome.desktop",
+        "rm -f /app/share/applications/kitty-open.desktop",
+        "mv /app/share/icons/hicolor/256x256/apps/kitty.png /app/share/icons/hicolor/256x256/apps/io.github.kreed.KittyChrome.png",
+        "mv /app/share/icons/hicolor/scalable/apps/kitty.svg /app/share/icons/hicolor/scalable/apps/io.github.kreed.KittyChrome.svg",
+        "install -Dm644 flatpak/io.github.kreed.KittyChrome.metainfo.xml /app/share/metainfo/io.github.kreed.KittyChrome.metainfo.xml",
+        "rm -rf /app/go"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": ".."
+        },
+        {
+          "type": "archive",
+          "url": "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.0/NerdFontsSymbolsOnly.tar.xz",
+          "sha256": "b7ef2283462b435f1fe91d729dc412d5dbe34269dd2c7f4e1d803e4105c8d883",
+          "dest": "flatpak-sources/nerd-fonts",
+          "strip-components": 0
+        }
+      ]
+    }
+  ]
+}

@@ -1043,6 +1043,8 @@ render_prepared_os_window(
         }
     }
     setup_os_window_for_rendering(os_window, tab, active_window, false, now);
+    draw_kitty_chrome_frame(os_window);
+    apply_window_corner_mask(os_window);
     if (global_state.thumbnail_callback.os_window == os_window->id) {
         thumbnail_callback(os_window);
         global_state.thumbnail_callback.os_window = 0;

@@ -34,6 +34,8 @@ enum {
     BLIT_PROGRAM,
     SCREENSHOT_PROGRAM,
     ROUNDED_RECT_PROGRAM,
+    WINDOW_FRAME_PROGRAM,
+    WINDOW_MASK_PROGRAM,
     PADDING_PROGRAM,
 
     CUSTOM_END_PROGRAM,
@@ -371,6 +373,81 @@ draw_rounded_rect(
 }
 // }}}
 
+static ssize_t shader_globals_vao_idx = -1;
+
+// The drawable grows as soon as the compositor configures us, while
+// viewport_width and viewport_height only catch up once kitty reflows, which it
+// defers during a live resize. Sizing the chrome from the stale viewport leaves
+// every pixel beyond it outside the frame's inner rect, so the newly exposed
+// strip fills with the frame gradient instead of the window background.
+static void
+chrome_drawable_size(const OSWindow *os_window, float *width, float *height) {
+    if (os_window->live_resize.in_progress && os_window->live_resize.width && os_window->live_resize.height) {
+        *width = (float)os_window->live_resize.width;
+        *height = (float)os_window->live_resize.height;
+    } else {
+        *width = (float)os_window->viewport_width;
+        *height = (float)os_window->viewport_height;
+    }
+}
+
+void
+draw_kitty_chrome_frame(OSWindow *os_window) {
+    unsigned frame_x, frame_y;
+    if (!kitty_chrome_frame(os_window, &frame_x, &frame_y)) return;
+
+    float xscale = 1.f, yscale = 1.f;
+    double xdpi, ydpi;
+    get_os_window_content_scale(os_window, &xdpi, &ydpi, &xscale, &yscale);
+    float dw, dh;
+    chrome_drawable_size(os_window, &dw, &dh);
+
+    save_viewport_using_bottom_left_origin(0, 0, (GLsizei)dw, (GLsizei)dh);
+    bind_program(WINDOW_FRAME_PROGRAM);
+    bind_vertex_array(shader_globals_vao_idx);
+    glUniform2f(program_uniform_location(WINDOW_FRAME_PROGRAM, "window_size"), dw, dh);
+    glUniform2f(program_uniform_location(WINDOW_FRAME_PROGRAM, "frame_width"), frame_x, frame_y);
+    glUniform1f(program_uniform_location(WINDOW_FRAME_PROGRAM, "corner_radius"), 12.f * (xscale + yscale) * .5f);
+    glUniform1f(program_uniform_location(WINDOW_FRAME_PROGRAM, "dark_appearance"), glfwGetCurrentSystemColorTheme(true) == GLFW_COLOR_SCHEME_DARK ? 1.f : 0.f);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_FRAMEBUFFER_SRGB);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glDisable(GL_FRAMEBUFFER_SRGB);
+    unbind_program();
+    unbind_vertex_array();
+    restore_viewport();
+}
+
+void
+apply_window_corner_mask(OSWindow *os_window) {
+    if (!kitty_chrome_frame(os_window, NULL, NULL)) return;
+    // The carve multiplies the destination by the coverage, so without a
+    // transparent framebuffer to write into the corners come out black rather
+    // than cut away. Square corners are the better failure.
+    if (!os_window->background_opacity.supports_transparency) return;
+
+    float xscale = 1.f, yscale = 1.f;
+    double xdpi, ydpi;
+    get_os_window_content_scale(os_window, &xdpi, &ydpi, &xscale, &yscale);
+    const float radius = 12.f * (xscale + yscale) * .5f;
+    float dw, dh;
+    chrome_drawable_size(os_window, &dw, &dh);
+
+    save_viewport_using_bottom_left_origin(0, 0, (GLsizei)dw, (GLsizei)dh);
+    bind_program(WINDOW_MASK_PROGRAM);
+    bind_vertex_array(shader_globals_vao_idx);
+    glUniform2f(program_uniform_location(WINDOW_MASK_PROGRAM, "window_size"), dw, dh);
+    glUniform1f(program_uniform_location(WINDOW_MASK_PROGRAM, "corner_radius"), radius);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ZERO, GL_SRC_ALPHA);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    unbind_program();
+    unbind_vertex_array();
+    restore_viewport();
+}
+
 // Cell {{{
 
 enum {
@@ -383,7 +460,6 @@ enum {
 enum { GAMMA_LUT_GLOBAL_BUFFER, BORDER_COLORS_GLOBAL_BUFFER };
 // VAOs used only to hold buffers for UBOs that are shared amongst programs/windows,
 // their vertex attribute/array facilities are unused.
-static ssize_t shader_globals_vao_idx = -1;
 static ssize_t custom_end_vao_idx = -1;
 
 typedef enum { CUSTOM_SHADER_TEXTURE_DEFAULT, CUSTOM_SHADER_TEXTURE_A, CUSTOM_SHADER_TEXTURE_B, CUSTOM_SHADER_TEXTURE_PERSIST } NamedTexture;
@@ -3171,6 +3247,8 @@ init_shaders(PyObject *module) {
     C(BLIT_PROGRAM);
     C(SCREENSHOT_PROGRAM);
     C(ROUNDED_RECT_PROGRAM);
+    C(WINDOW_FRAME_PROGRAM);
+    C(WINDOW_MASK_PROGRAM);
     C(PADDING_PROGRAM);
     C(CUSTOM_END_PROGRAM);
     C(MAX_CUSTOM_SHADER_GROUPS);

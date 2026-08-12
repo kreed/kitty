@@ -751,11 +751,11 @@ pyset_borders_rects(PyObject *self UNUSED, PyObject *args) {
 
 
 static unsigned
-vertical_tab_bar_cols(const OSWindow *os_window, long margin_outer, long margin_inner) {
+vertical_tab_bar_cols(const OSWindow *os_window, long margin_outer, long margin_inner, unsigned available_width) {
     unsigned cell_width = MAX(1u, os_window->fonts_data->fcm.cell_width);
-    long available_width = (long)os_window->viewport_width - margin_outer - margin_inner;
-    if (available_width <= 0) return 0;
-    unsigned available_cols = MAX(1u, (unsigned)available_width / cell_width);
+    long width = (long)available_width - margin_outer - margin_inner;
+    if (width <= 0) return 0;
+    unsigned available_cols = MAX(1u, (unsigned)width / cell_width);
     unsigned title_cols = OPT(tab_title_max_length) > 0 ? (unsigned)OPT(tab_title_max_length) : 20u;
     unsigned desired_cols = title_cols + 8u;
     unsigned soft_max = available_cols / 3u;
@@ -763,49 +763,70 @@ vertical_tab_bar_cols(const OSWindow *os_window, long margin_outer, long margin_
     return MAX(1u, MIN(available_cols, MIN(desired_cols, MAX(1u, soft_max))));
 }
 
+bool
+kitty_chrome_frame(const OSWindow *os_window, unsigned *x, unsigned *y) {
+    // The frame is our own chrome, painted inside our surface, so it follows
+    // the decorations rather than the compositor: no frame when the window is
+    // undecorated, and none when it is maximized or fullscreen because there
+    // is no gap around the window to decorate.
+    if (!global_state.is_wayland || !os_window->handle || OPT(hide_window_decorations) || glfwGetWindowAttrib(os_window->handle, GLFW_MAXIMIZED) ||
+        is_os_window_fullscreen((OSWindow *)os_window))
+        return false;
+
+    float xscale = 1.f, yscale = 1.f;
+    double xdpi, ydpi;
+    get_os_window_content_scale((OSWindow *)os_window, &xdpi, &ydpi, &xscale, &yscale);
+    if (x) *x = MAX(1u, (unsigned)lroundf(3.f * xscale));
+    if (y) *y = MAX(1u, (unsigned)lroundf(3.f * yscale));
+    return true;
+}
+
 void
 os_window_regions(const OSWindow *os_window, Region *central, Region *tab_bar) {
+    unsigned frame_x = 0, frame_y = 0;
+    kitty_chrome_frame(os_window, &frame_x, &frame_y);
+    central->left = MIN((int)frame_x, os_window->viewport_width);
+    central->top = MIN((int)frame_y, os_window->viewport_height);
+    central->right = MAX(central->left, (long)os_window->viewport_width - (long)frame_x);
+    central->bottom = MAX(central->top, (long)os_window->viewport_height - (long)frame_y);
+    zero_at_ptr(tab_bar);
+
     if (!OPT(tab_bar_hidden) && os_window->num_tabs && !os_window->has_too_few_tabs) {
         long margin_outer = pt_to_px_for_os_window(OPT(tab_bar_margin_height.outer), os_window);
         long margin_inner = pt_to_px_for_os_window(OPT(tab_bar_margin_height.inner), os_window);
-        central->left = 0;
-        central->right = os_window->viewport_width;
-        central->top = 0;
-        central->bottom = os_window->viewport_height;
         switch (OPT(tab_bar_edge)) {
             case TOP_EDGE: {
                 unsigned tab_bar_height = os_window->fonts_data->fcm.cell_height + margin_inner + margin_outer;
-                central->top = tab_bar_height;
-                central->bottom = os_window->viewport_height;
+                central->top += tab_bar_height;
                 central->top = MIN(central->top, central->bottom);
-                tab_bar->top = margin_outer;
+                tab_bar->top = frame_y + margin_outer;
                 tab_bar->left = central->left;
                 tab_bar->right = central->right;
                 tab_bar->bottom = tab_bar->top + os_window->fonts_data->fcm.cell_height;
                 break;
             }
             case LEFT_EDGE: {
-                unsigned left_cols = vertical_tab_bar_cols(os_window, margin_outer, margin_inner);
+                unsigned left_cols = vertical_tab_bar_cols(os_window, margin_outer, margin_inner, central->right - central->left);
                 if (!left_cols) {
                     zero_at_ptr(tab_bar);
                     return;
                 }
                 unsigned left_width = left_cols * os_window->fonts_data->fcm.cell_width;
-                central->left = MIN((long)(left_width + margin_inner + margin_outer), (long)central->right);
-                tab_bar->left = margin_outer;
+                central->left = MIN(central->left + (long)(left_width + margin_inner + margin_outer), central->right);
+                tab_bar->left = frame_x + margin_outer;
                 tab_bar->right = tab_bar->left + left_width;
                 tab_bar->top = central->top;
                 tab_bar->bottom = central->bottom;
                 break;
             }
             case RIGHT_EDGE: {
-                unsigned right_cols = vertical_tab_bar_cols(os_window, margin_outer, margin_inner);
+                unsigned right_cols = vertical_tab_bar_cols(os_window, margin_outer, margin_inner, central->right - central->left);
                 if (!right_cols) {
                     zero_at_ptr(tab_bar);
                     return;
                 }
                 unsigned right_width = right_cols * os_window->fonts_data->fcm.cell_width;
-                central->right = MAX(0, (long)os_window->viewport_width - (long)(right_width + margin_inner + margin_outer));
+                central->right = MAX(central->left, central->right - (long)(right_width + margin_inner + margin_outer));
                 tab_bar->left = central->right + margin_inner;
                 tab_bar->right = tab_bar->left + right_width;
                 tab_bar->top = central->top;
@@ -814,9 +835,7 @@ os_window_regions(const OSWindow *os_window, Region *central, Region *tab_bar) {
             }
             default: {
                 unsigned tab_bar_height = os_window->fonts_data->fcm.cell_height + margin_inner + margin_outer;
-                central->top = 0;
-                long bottom = os_window->viewport_height - tab_bar_height;
-                central->bottom = MAX(0, bottom);
+                central->bottom = MAX(central->top, central->bottom - (long)tab_bar_height);
                 tab_bar->top = central->bottom + margin_inner;
                 tab_bar->left = central->left;
                 tab_bar->right = central->right;
@@ -824,12 +843,6 @@ os_window_regions(const OSWindow *os_window, Region *central, Region *tab_bar) {
                 break;
             }
         }
-    } else {
-        zero_at_ptr(tab_bar);
-        central->left = 0;
-        central->top = 0;
-        central->right = os_window->viewport_width;
-        central->bottom = os_window->viewport_height;
     }
 }
 

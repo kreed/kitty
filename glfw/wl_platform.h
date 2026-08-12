@@ -242,6 +242,13 @@ typedef struct _GLFWwindowWayland {
 
     struct {
         bool serverSide, buffer_destroyed, titlebar_needs_update, dragging, titlebar_hidden;
+        // The titlebar is a pop-over holding only the window controls: it
+        // overlays the top right of the content rather than reserving space
+        // above it, and is only mapped while the pointer is near that corner,
+        // fading in and out as it comes and goes.
+        bool titlebar_revealed;
+        double titlebar_opacity;
+        id_type titlebar_fade_timer;
         _GLFWCSDSurface focus;
 
         _GLFWWaylandCSDSurface titlebar, shadow_left, shadow_right, shadow_top, shadow_bottom, shadow_upper_left, shadow_upper_right, shadow_lower_left,
@@ -526,6 +533,7 @@ struct wl_cursor *_glfwLoadCursor(GLFWCursorShape, struct wl_cursor_theme *);
 void destroy_data_offer(_GLFWWaylandDataOffer *);
 const char *_glfwWaylandCompositorName(void);
 void _glfwWaylandConfirmDragSession(void);
+void commit_window_surface_if_safe(_GLFWwindow *window);
 
 typedef struct wayland_cursor_shape {
     int which;

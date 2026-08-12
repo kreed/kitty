@@ -54,6 +54,8 @@ from kitty.fast_data_types import (
     STRIKETHROUGH,
     TINT_PROGRAM,
     TRAIL_PROGRAM,
+    WINDOW_FRAME_PROGRAM,
+    WINDOW_MASK_PROGRAM,
     compile_program,
     get_options,
 )
@@ -238,6 +240,8 @@ class LoadShaderPrograms:
             'blit': BLIT_PROGRAM,
             'screenshot': SCREENSHOT_PROGRAM,
             'rounded_rect': ROUNDED_RECT_PROGRAM,
+            'window_frame': WINDOW_FRAME_PROGRAM,
+            'window_mask': WINDOW_MASK_PROGRAM,
             'border': BORDERS_PROGRAM,
             'padding': PADDING_PROGRAM,
         }.items():

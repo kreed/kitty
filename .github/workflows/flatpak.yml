@@ -1,0 +1,97 @@
+name: Flatpak
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Flatpak
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      bundle: ${{ steps.version.outputs.bundle }}
+
+    steps:
+      - name: Check out Kitty
+        uses: actions/checkout@v4
+
+      # The tag names both halves of what a bundle actually is: the upstream
+      # kitty release it forks from, and the fork commit that built it. Two
+      # builds of the same upstream version never collide, and consumers can
+      # tell at a glance which kitty they are pinned to.
+      - name: Derive version
+        id: version
+        run: |
+          version="$(sed -n 's/^version: Version = Version(\([0-9]*\), \([0-9]*\), \([0-9]*\)).*/\1.\2.\3/p' kitty/constants.py)"
+          # Fail loudly rather than publishing a v-8chars tag: upstream moving
+          # this declaration is exactly the kind of thing that would otherwise
+          # produce a subtly wrong tag on every release from then on.
+          if [ -z "$version" ]; then
+            echo "could not parse version from kitty/constants.py" >&2
+            exit 1
+          fi
+          {
+            echo "tag=v$version-$(echo "$GITHUB_SHA" | cut -c1-8)"
+            echo "bundle=kitty-chrome-$version-$(echo "$GITHUB_SHA" | cut -c1-8).flatpak"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: ${{ steps.version.outputs.bundle }}
+          manifest-path: flatpak/io.github.kreed.KittyChrome.json
+          cache-key: flatpak-builder-${{ github.sha }}
+
+      # Published beside the bundle so a consumer pinning the asset by hash --
+      # the Nix side does -- can read the digest without downloading it first.
+      - name: Checksum bundle
+        run: sha256sum "${{ steps.version.outputs.bundle }}" | tee "${{ steps.version.outputs.bundle }}.sha256"
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: |
+            ${{ steps.version.outputs.bundle }}
+            ${{ steps.version.outputs.bundle }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    # Scoped to this job so the build, which runs third-party actions against a
+    # privileged container, keeps the read-only default token.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          name: ${{ needs.build.outputs.tag }}
+          # The tag is half the point of the naming scheme, so it has to be
+          # created against the commit that was actually built. Left to the
+          # action's default it lands on whatever the default branch points at
+          # when this job runs -- so a second push landing mid-build gives this
+          # bundle a tag naming someone else's commit.
+          target_commitish: ${{ github.sha }}
+          fail_on_unmatched_files: true
+          files: |
+            ${{ needs.build.outputs.bundle }}
+            ${{ needs.build.outputs.bundle }}.sha256

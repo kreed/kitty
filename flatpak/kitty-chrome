@@ -1,0 +1,56 @@
+#!/bin/sh
+set -eu
+
+host_shell=$(flatpak-spawn --host printenv SHELL 2>/dev/null || :)
+case "$host_shell" in
+    /*) export SHELL=$host_shell ;;
+esac
+
+host_path=
+case "$host_shell" in
+    /*) host_path=$(flatpak-spawn --host "$host_shell" -lc 'printf "%s\n" "$PATH"' 2>/dev/null || :) ;;
+esac
+if [ -z "$host_path" ]; then
+    host_path=$(flatpak-spawn --host printenv PATH 2>/dev/null || :)
+fi
+
+# Terminal children run on the host (see kitty/host_spawn.py) and get the host
+# session's own PATH, so this only sets up kitty's PATH inside the sandbox and
+# the fallback used when the host agent cannot be reached. Host directories are
+# mounted below /run/host and cannot be used as sandbox PATH entries, so keep
+# only user/Nix paths and let /app/bin bridge system tools such as podman,
+# distrobox and wssh.
+user_path=
+old_ifs=$IFS
+IFS=:
+for path_entry in $host_path; do
+    case "$path_entry" in
+        "$HOME"/*|/nix/*)
+            if [ -n "$user_path" ]; then
+                user_path="$user_path:$path_entry"
+            else
+                user_path=$path_entry
+            fi
+            ;;
+    esac
+done
+IFS=$old_ifs
+export PATH="/app/bin${user_path:+:$user_path}:/usr/bin:/usr/sbin"
+
+host_theme=$(flatpak-spawn --host gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null || :)
+host_theme=${host_theme#\'}
+host_theme=${host_theme%\'}
+for theme_dir in \
+    "$HOME/.themes/$host_theme" \
+    "$HOME/.local/share/themes/$host_theme" \
+    "/run/host/usr/local/share/themes/$host_theme" \
+    "/run/host/usr/share/themes/$host_theme"
+do
+    if [ -f "$theme_dir/gtk-4.0/gtk.css" ]; then
+        export GTK_THEME=$host_theme
+        export XDG_DATA_DIRS="/run/host/usr/local/share:/run/host/usr/share:${XDG_DATA_DIRS:-/app/share:/usr/share}"
+        break
+    fi
+done
+
+exec /app/bin/kitty -o linux_display_server=wayland "$@"
