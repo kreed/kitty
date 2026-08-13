@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Check out Kitty
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # The tag names both halves of what a bundle actually is: the upstream
       # kitty release it forks from, and the fork commit that built it. Two
@@ -57,7 +57,7 @@ jobs:
         run: sha256sum "${{ steps.version.outputs.bundle }}" | tee "${{ steps.version.outputs.bundle }}.sha256"
 
       - name: Upload bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bundle
           path: |
@@ -76,12 +76,12 @@ jobs:
 
     steps:
       - name: Download bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: bundle
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.build.outputs.tag }}
           name: ${{ needs.build.outputs.tag }}
