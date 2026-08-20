@@ -222,7 +222,7 @@ commit_window_surface(_GLFWwindow *window) {
     wl_surface_commit(window->wl.surface);
 }
 
-static void
+void
 commit_window_surface_if_safe(_GLFWwindow *window) {
     // we only commit if the buffer attached to the surface is the correct size,
     // which means that at least one frame is drawn after resizeFramebuffer()
@@ -1072,20 +1072,12 @@ static const struct xdg_surface_listener xdgSurfaceListener = {xdgSurfaceHandleC
 
 static void
 setXdgDecorations(_GLFWwindow *window) {
-    if (window->wl.xdg.decoration) {
-        if (window->wl.decorations.titlebar_hidden) {
-            window->wl.decorations.serverSide = false;
-            zxdg_toplevel_decoration_v1_set_mode(window->wl.xdg.decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE);
-            csd_set_visible(window, csd_should_window_be_decorated(window));
-        } else {
-            window->wl.decorations.serverSide = true;
-            zxdg_toplevel_decoration_v1_set_mode(
-                window->wl.xdg.decoration, window->decorated ? ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE : ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE);
-        }
-    } else {
-        window->wl.decorations.serverSide = false;
-        csd_set_visible(window, csd_should_window_be_decorated(window));
-    }
+    // The window chrome is ours on every compositor, so ask for client side
+    // decorations even where the compositor offers its own, as KWin does.
+    // Otherwise it draws its titlebar and frame around ours.
+    window->wl.decorations.serverSide = false;
+    if (window->wl.xdg.decoration) zxdg_toplevel_decoration_v1_set_mode(window->wl.xdg.decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE);
+    csd_set_visible(window, csd_should_window_be_decorated(window));
 }
 
 void

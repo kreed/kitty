@@ -12,6 +12,7 @@
 #include <sys/mman.h>
 #include <errno.h>
 #include <string.h>
+#include <math.h>
 #include <stdlib.h>
 // Needed for the BTN_* defines
 #ifdef __has_include
@@ -42,6 +43,11 @@
 
 // shadow tile  {{{
 typedef float kernel_type;
+
+// The radius the window is rounded to, matching window_mask.slang. The shadow
+// silhouette and the controls pop-over both have to use it, or they square off
+// the corner the mask carves away.
+#define WINDOW_CORNER_RADIUS 12.0
 
 static void
 build_blur_kernel(kernel_type *blur_kernel, const size_t size, kernel_type sigma) {
@@ -163,7 +169,14 @@ create_shadow_tile(_GLFWwindow *window) {
 
 static bool
 window_needs_shadows(_GLFWwindow *w) {
-    return !(w->wl.current.toplevel_states & TOPLEVEL_STATE_DOCKED);
+    (void)w;
+    // No drop shadow. The shadow is drawn as square tiles ringing the window's
+    // bounding box, so it fills the notch the corner mask carves out and the
+    // corners read as square against any background dark enough to show it.
+    // Rounding the silhouette is not enough: render_shadows() slices only the
+    // outermost margin of the tile into the corner surfaces, which is outside
+    // the rounded part. The painted frame carries the window edge instead.
+    return false;
 }
 
 static void
@@ -278,24 +291,16 @@ typedef struct {
     uint32_t bg, fg, button, hovered_button, pressed_button;
 } TitlebarColors;
 
+// The pop-over reads as part of the frame, so it takes the frame's own base
+// color rather than the titlebar palette. Keep the base colors in step with
+// window_frame.slang. Button backgrounds are tints of it, as upstream does
+// for its titlebar.
 static TitlebarColors
-titlebar_colors(_GLFWwindow *window) {
-    static const uint32_t dark_bg = 0xff303030, light_bg = 0xffebebeb;
+popover_colors(void) {
+    const bool dark = glfwGetCurrentSystemColorTheme(true) == GLFW_COLOR_SCHEME_DARK;
     TitlebarColors ans;
-    const GLFWColorScheme appearance = glfwGetCurrentSystemColorTheme(false);
-    bool dark = appearance == GLFW_COLOR_SCHEME_DARK;
-    ans.bg = dark ? dark_bg : light_bg;
-    if (decs.use_custom_titlebar_color || appearance == GLFW_COLOR_SCHEME_NO_PREFERENCE) {
-        // When using system colors and the desktop has no preference, follow
-        // the background color of the active kitty window.
-        const uint32_t color = 0xff000000 | (decs.titlebar_color & 0xffffff);
-        dark = .2126 * R(color) + .7152 * G(color) + .0722 * B(color) < 128;
-        ans.bg = decs.use_custom_titlebar_color ? color : (dark ? dark_bg : light_bg);
-    }
-    const bool focused = window->id == _glfw.focusedWindowId;
-    ans.fg = dark ? (focused ? 0xffeeeeee : 0xffaaaaaa) : (focused ? 0xff333333 : 0xff888888);
-    // Button backgrounds are tints of the titlebar background so that they
-    // fit in with custom titlebar colors as well.
+    ans.bg = dark ? 0xff17171a : 0xfff0f0f4;
+    ans.fg = dark ? 0xffe6e6e6 : 0xff444444;
     static const double dark_tints[3] = {.116, .232, .31}, light_tints[3] = {.09, .187, .277};
     const double *tints = dark ? dark_tints : light_tints;
     const uint32_t tint = dark ? 0xffffffff : 0xff000000;
@@ -372,8 +377,10 @@ decoration_resize_edges(_GLFWCSDSurface surface) {
         case CSD_shadow_left: return XDG_TOPLEVEL_RESIZE_EDGE_LEFT;
         case CSD_shadow_upper_left: return XDG_TOPLEVEL_RESIZE_EDGE_TOP_LEFT;
         case CSD_shadow_right: return XDG_TOPLEVEL_RESIZE_EDGE_RIGHT;
-        case CSD_shadow_upper_right: return XDG_TOPLEVEL_RESIZE_EDGE_TOP_RIGHT;
-        case CSD_shadow_top: return XDG_TOPLEVEL_RESIZE_EDGE_TOP;
+        // The top edge moves the window and the top right corner, under the
+        // window controls, does nothing.
+        case CSD_shadow_upper_right:
+        case CSD_shadow_top: return XDG_TOPLEVEL_RESIZE_EDGE_NONE;
         case CSD_shadow_lower_left: return XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_LEFT;
         case CSD_shadow_bottom: return XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM;
         case CSD_shadow_lower_right: return XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_RIGHT;
@@ -430,6 +437,22 @@ layout_titlebar_buttons(_GLFWwindow *window, int width, int slot, int pad, Place
     return used;
 }
 
+// The buttons the desktop layout asks for and the compositor supports, the
+// pop-over holds exactly these.
+static unsigned
+popover_button_count(_GLFWwindow *window) {
+    PlacedTitlebarButton buttons[TITLEBAR_BUTTON_COUNT];
+    int margin;
+    return layout_titlebar_buttons(window, TITLEBAR_BUTTON_COUNT, 1, 0, buttons, &margin);
+}
+
+// The titlebar holds nothing but the window controls, so it is exactly as
+// wide as the buttons it draws and is mapped only while revealed.
+static unsigned
+popover_width(_GLFWwindow *window) {
+    return popover_button_count(window) * decs.metrics.visible_titlebar_height;
+}
+
 static void
 render_titlebar_button(
     uint32_t *pixels,
@@ -463,29 +486,18 @@ render_titlebar_button(
         }
 }
 
-// Rounds the upper corners of the titlebar, filling the cutouts with the
-// shadow, so that it matches the shadow in the adjacent subsurfaces.
+// The pop-over sits over the top right corner window_mask.slang carves away,
+// so it rounds that corner to match or it would square it off.
 static void
-render_titlebar_corners(_GLFWwindow *window, uint32_t *pixels, int width, int height, double scale, bool focused) {
-    const size_t shadow_margin = create_shadow_tile(window);
-    const double radius = fmin(12 * scale, fmin(width / 2., height));
-    for (int y = 0; y < (int)ceil(radius); y++)
-        for (int x = 0; x < width; x++) {
-            const double dx = x < width / 2 ? radius - x - .5 : x + .5 - (width - radius);
-            if (dx <= 0) continue;
-            const double coverage = fmax(0, fmin(1, radius - hypot(dx, radius - y - .5) + .5));
-            uint32_t color = coverage_pixel(pixels[y * width + x], coverage);
-            // Distance from the nearest vertical edge of the titlebar
-            const size_t corner_x = x < width / 2 ? (size_t)x : (size_t)(width - x);
-            if (decs.shadow_tile.data && shadow_margin + corner_x < decs.shadow_tile.stride && shadow_margin + (size_t)y < decs.shadow_tile.stride) {
-                const size_t sx = x < width / 2 ? shadow_margin + corner_x : decs.shadow_tile.stride - shadow_margin - corner_x;
-                const size_t sy = shadow_margin + y;
-                unsigned shadow_alpha = A(decs.shadow_tile.data[sy * decs.shadow_tile.stride + sx]);
-                if (!focused) shadow_alpha /= 2;
-                const unsigned alpha = A(color) + (unsigned)(shadow_alpha * (1 - coverage));
-                color = (color & 0xffffff) | (alpha << 24);
-            }
-            pixels[y * width + x] = color;
+round_top_right_corner(uint32_t *pixels, int width, int height, double radius) {
+    if (radius <= 0 || width < 2 || height < 2) return;
+    const double cx = width - radius, cy = radius;
+    for (int y = 0; y < height && y < cy; y++)
+        for (int x = MAX(0, (int)cx); x < width; x++) {
+            const double dx = x + .5 - cx, dy = y + .5 - cy;
+            if (dx <= 0 || dy >= 0) continue; // outside the corner quadrant
+            const double coverage = radius - hypot(dx, dy) + .5;
+            if (coverage < 1) pixels[y * width + x] = coverage_pixel(pixels[y * width + x], coverage);
         }
 }
 
@@ -495,19 +507,21 @@ render_title_bar(_GLFWwindow *window, bool to_front_buffer) {
     const int width = decs.titlebar.buffer.width, height = decs.titlebar.buffer.height;
     if (width <= 0 || height <= 0) return;
     const double scale = decs.for_window_state.fscale;
-    const bool focused = window->id == _glfw.focusedWindowId;
-    const bool docked = window->wl.current.toplevel_states & TOPLEVEL_STATE_DOCKED;
     const bool maximized = window->wl.current.toplevel_states & TOPLEVEL_STATE_MAXIMIZED;
-    const TitlebarColors colors = titlebar_colors(window);
+    const TitlebarColors colors = popover_colors();
     for (int i = 0; i < width * height; i++) pixels[i] = colors.bg;
 
-    const int slot = MAX(1, (int)round(36 * scale));
-    const int pad = MAX(0, MIN((int)round(6 * scale), (width - slot) / 2));
+    // The pop-over carries the window controls and nothing else, so there is
+    // no title to draw. It is exactly as wide as the buttons, one square slot
+    // each; the buffer is scaled as a whole while a slot is scaled on its own,
+    // and round(n * w * scale) can come out below n * round(w * scale), so
+    // derive the slot from the width too rather than trusting them to agree.
     PlacedTitlebarButton buttons[TITLEBAR_BUTTON_COUNT];
     int margin;
-    const unsigned num_buttons = layout_titlebar_buttons(window, width, slot, pad, buttons, &margin);
-    if (width > 2 * margin && window->wl.title && _glfw.callbacks.draw_text)
-        _glfw.callbacks.draw_text((GLFWwindow *)window, window->wl.title, colors.fg, colors.bg, (uint8_t *)pixels, width, height, margin, 0, margin, false);
+    const unsigned wanted = popover_button_count(window);
+    if (!wanted) return;
+    const int slot = MAX(1, MIN(height, width / (int)wanted));
+    const unsigned num_buttons = layout_titlebar_buttons(window, width, slot, 0, buttons, &margin);
 
     decs.minimize.width = decs.maximize.width = decs.close.width = 0;
     for (unsigned i = 0; i < num_buttons; i++) {
@@ -528,8 +542,23 @@ render_title_bar(_GLFWwindow *window, bool to_front_buffer) {
     if (!decs.close.width) decs.close.hovered = false;
     if (!decs.maximize.width) decs.maximize.hovered = false;
     if (!decs.minimize.width) decs.minimize.hovered = false;
-    // The terminal owns the bottom corners, only the separate header is rounded
-    if (!docked) render_titlebar_corners(window, pixels, width, height, scale, focused);
+    // Only round when the window itself is rounded: maximized and fullscreen
+    // windows square off their corners, matching kitty_chrome_frame().
+    if (!(window->wl.current.toplevel_states & (TOPLEVEL_STATE_MAXIMIZED | TOPLEVEL_STATE_FULLSCREEN)))
+        round_top_right_corner(pixels, width, height, WINDOW_CORNER_RADIUS * scale);
+}
+
+// Wayland shm buffers are premultiplied, so fading means scaling the color
+// along with the alpha.
+static void
+apply_titlebar_opacity(uint8_t *data, size_t size_in_bytes, double opacity) {
+    if (opacity >= 1.0) return;
+    const uint32_t scale = (uint32_t)(opacity <= 0 ? 0 : opacity * 255.0 + 0.5);
+    for (uint32_t *px = (uint32_t *)data, *end = (uint32_t *)(data + size_in_bytes); px < end; px++) {
+        const uint32_t a = (((*px >> 24) & 0xff) * scale) / 255, r = (((*px >> 16) & 0xff) * scale) / 255;
+        const uint32_t g = (((*px >> 8) & 0xff) * scale) / 255, b = ((*px & 0xff) * scale) / 255;
+        *px = (a << 24) | (r << 16) | (g << 8) | b;
+    }
 }
 
 static bool
@@ -543,6 +572,7 @@ update_title_bar(_GLFWwindow *window) {
     }
     pair->has_pending_update = false;
     render_title_bar(window, false);
+    apply_titlebar_opacity(pair->data.back, pair->size_in_bytes, decs.titlebar_opacity);
     swap_buffers(pair);
     return true;
 }
@@ -634,13 +664,22 @@ render_shadows(_GLFWwindow *window) {
 }
 #undef st
 
+// The titlebar holds nothing but the window controls, so it is exactly as
+// wide as the buttons it draws and is mapped only while revealed.
+
+static bool
+window_has_popover(_GLFWwindow *window) {
+    return !decs.titlebar_hidden && popover_width(window) > 0;
+}
+
 static bool
 create_shm_buffers(_GLFWwindow *window) {
     decs.mapping.size = 0;
-    const bool has_titlebar = !decs.titlebar_hidden;
-    const int side_height = window->wl.height + (has_titlebar ? decs.metrics.visible_titlebar_height : 0);
+    const bool has_titlebar = window_has_popover(window);
+    // The pop-over overlays the content, so the sides span the content alone.
+    const int side_height = window->wl.height;
 #define bp(which, width, height) decs.mapping.size += init_buffer_pair(&decs.which.buffer, width, height, decs.for_window_state.fscale);
-    if (has_titlebar) bp(titlebar, window->wl.width, decs.metrics.visible_titlebar_height);
+    if (has_titlebar) bp(titlebar, popover_width(window), decs.metrics.visible_titlebar_height);
     bp(shadow_top, window->wl.width, decs.metrics.width);
     bp(shadow_bottom, window->wl.width, decs.metrics.width);
     bp(shadow_left, decs.metrics.width, side_height);
@@ -670,7 +709,10 @@ create_shm_buffers(_GLFWwindow *window) {
     all_shadow_surfaces(Q);
 #undef Q
     wl_shm_pool_destroy(pool);
-    if (has_titlebar) render_title_bar(window, true);
+    if (has_titlebar) {
+        render_title_bar(window, true);
+        apply_titlebar_opacity(decs.titlebar.buffer.data.front, decs.titlebar.buffer.size_in_bytes, decs.titlebar_opacity);
+    }
     render_shadows(window);
     debug("Created decoration buffers at scale: %f\n", decs.for_window_state.fscale);
     return true;
@@ -762,7 +804,7 @@ ensure_csd_resources(_GLFWwindow *window) {
     // Never create decorations for windows that should not have them, such
     // as fullscreen windows, even if the stored state is stale
     if (!csd_should_window_be_decorated(window)) return false;
-    const bool has_titlebar = !decs.titlebar_hidden;
+    const bool has_titlebar = window_has_popover(window);
     const bool is_focused = window->id == _glfw.focusedWindowId;
     const bool focus_changed = is_focused != decs.for_window_state.focused;
     const double current_scale = _glfwWaylandWindowScale(window);
@@ -800,14 +842,14 @@ ensure_csd_resources(_GLFWwindow *window) {
         if (!create_shm_buffers(window)) return false;
     }
 
-    const int top_y = has_titlebar ? -(int)decs.metrics.visible_titlebar_height : 0;
+    const int top_y = 0; // the pop-over overlays the content, it reserves nothing
 
 #define setup_surface(which, x, y)                                     \
     if (!decs.which.surface) create_csd_surfaces(window, &decs.which); \
     position_csd_surface(&decs.which, x, y);
 
     if (has_titlebar) {
-        setup_surface(titlebar, 0, -decs.metrics.visible_titlebar_height);
+        setup_surface(titlebar, window->wl.width - (int)popover_width(window), 0);
     } else {
         free_csd_surface(&decs.titlebar);
         if (decs.focus == CSD_titlebar) {
@@ -826,7 +868,12 @@ ensure_csd_resources(_GLFWwindow *window) {
 
     if (has_titlebar) {
         if (focus_changed || state_changed) update_title_bar(window);
-        damage_csd(titlebar, decs.titlebar.buffer.front);
+        if (decs.titlebar_opacity > 0) {
+            damage_csd(titlebar, decs.titlebar.buffer.front);
+        } else if (decs.titlebar.surface) {
+            wl_surface_attach(decs.titlebar.surface, NULL, 0, 0);
+            wl_surface_commit(decs.titlebar.surface);
+        }
     }
 #define d(which) damage_csd(which, is_focused ? decs.which.buffer.front : decs.which.buffer.back);
     d(shadow_left);
@@ -855,8 +902,118 @@ csd_set_visible(_GLFWwindow *window, bool visible) {
     else free_csd_surfaces(window);
 }
 
+// A fade rather than a pop: the controls appear and disappear on pointer
+// proximity, and snapping them in and out at full opacity reads as a glitch.
+#define TITLEBAR_FADE_MS 180.0
+#define TITLEBAR_FADE_INTERVAL_MS 16
+
+static void
+titlebar_fade_tick(id_type timer_id, void *data) {
+    _GLFWwindow *window = data;
+    const double target = decs.titlebar_revealed ? 1.0 : 0.0;
+    const double step = TITLEBAR_FADE_INTERVAL_MS / TITLEBAR_FADE_MS;
+    if (decs.titlebar_opacity < target) decs.titlebar_opacity = MIN(target, decs.titlebar_opacity + step);
+    else decs.titlebar_opacity = MAX(target, decs.titlebar_opacity - step);
+
+    if (decs.titlebar.surface) {
+        if (decs.titlebar_opacity > 0) {
+            // csd_change_title() repaints into the back buffer, or, while the
+            // compositor still holds it, defers to its release.
+            csd_change_title(window);
+        } else {
+            wl_surface_attach(decs.titlebar.surface, NULL, 0, 0);
+            wl_surface_commit(decs.titlebar.surface);
+        }
+    }
+    commit_window_surface_if_safe(window);
+    if (decs.titlebar_opacity == target) toggleTimer(&_glfw.wl.eventLoopData, timer_id, 0);
+}
+
+static void
+start_titlebar_fade(_GLFWwindow *window) {
+    if (!decs.titlebar_fade_timer)
+        decs.titlebar_fade_timer = addTimer(
+            &_glfw.wl.eventLoopData, "kitty-chrome-popover-fade", ms_to_monotonic_t(TITLEBAR_FADE_INTERVAL_MS), 1, true, titlebar_fade_tick, window, NULL);
+    else toggleTimer(&_glfw.wl.eventLoopData, decs.titlebar_fade_timer, 1);
+}
+
+// Revealing maps the pop-over and hiding unmaps it, rather than creating and
+// destroying the surface: a sweep of the pointer across the corner would
+// otherwise tear down and rebuild the shm pool and every decoration buffer on
+// each crossing. Unmapping also takes the pointer off it, so leaving the window
+// directly from the pop-over hides it like any other exit.
+bool
+csd_set_titlebar_revealed(_GLFWwindow *window, bool revealed) {
+    if (decs.titlebar_revealed == revealed) return false;
+    decs.titlebar_revealed = revealed;
+    if (!window_is_csd_capable(window)) return false;
+    if (revealed) ensure_csd_resources(window);
+    else if (decs.focus == CSD_titlebar) {
+        decs.focus = CENTRAL_WINDOW;
+        decs.dragging = false;
+    }
+    start_titlebar_fade(window);
+    return true;
+}
+
+// The pop-over lives in the top right of the content. Reveal it while the
+// pointer is in that corner, and keep it revealed while the pointer is over the
+// pop-over itself, which the compositor reports as a leave of the main surface.
+bool
+csd_update_titlebar_reveal(_GLFWwindow *window, double x, double y) {
+    if (decs.titlebar_hidden || !window_is_csd_capable(window)) return false;
+    const double slop = 8.0;
+    const double zone_width = popover_width(window) + slop;
+    const double zone_height = decs.metrics.visible_titlebar_height + slop;
+    const bool inside = x >= window->wl.width - zone_width && y <= zone_height;
+    return csd_set_titlebar_revealed(window, inside || decs.focus == CSD_titlebar);
+}
+
+// The top edge drags the window. Above the surface that is the shadow strip,
+// but the painted frame inside our own surface is part of the same edge, and
+// without this the cursor flips between grab and the terminal's own cursor as
+// the pointer crosses between them. Kept to the painted frame's thickness so it
+// does not eat clicks on the first line of the terminal.
+#define TOP_DRAG_BAND 4.0
+bool
+csd_top_edge_contains(_GLFWwindow *window, double x, double y) {
+    if (decs.titlebar_hidden || !window_is_csd_capable(window) || !window->wl.xdg.toplevel) return false;
+    if (window->wl.current.toplevel_states & (TOPLEVEL_STATE_FULLSCREEN | TOPLEVEL_STATE_MAXIMIZED)) return false;
+    if (y < 0 || y > TOP_DRAG_BAND) return false;
+    return x >= 0 && x < (double)window->wl.width - (double)popover_width(window);
+}
+
+void
+csd_top_edge_set_cursor(_GLFWwindow *window) {
+    if (_glfw.wl.cursorPreviousShape != GLFW_GRAB_CURSOR) _glfwWaylandSetCursorShape(GLFW_GRAB_CURSOR, window);
+}
+
+bool
+csd_top_edge_start_move(_GLFWwindow *window, uint32_t button, uint32_t state) {
+    if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_PRESSED) return false;
+    xdg_toplevel_move(window->wl.xdg.toplevel, _glfw.wl.seat, _glfw.wl.pointer_serial);
+    return true;
+}
+
+// The compositor reports the pointer moving onto the pop-over as leaving the
+// main surface, and the matching enter has not arrived yet, so only hide when
+// the pointer was heading somewhere other than the pop-over itself.
+bool
+csd_handle_pointer_left_window(_GLFWwindow *window, double x, double y) {
+    if (!decs.titlebar_revealed) return false;
+    const double slop = 2.0;
+    const double left = (double)window->wl.width - (double)popover_width(window) - slop;
+    const double bottom = (double)decs.metrics.visible_titlebar_height + slop;
+    if (x >= left && y <= bottom) return false;
+    return csd_set_titlebar_revealed(window, false);
+}
+
 void
 csd_free_all_resources(_GLFWwindow *window) {
+    if (decs.titlebar_fade_timer) {
+        removeTimer(&_glfw.wl.eventLoopData, decs.titlebar_fade_timer);
+        decs.titlebar_fade_timer = 0;
+    }
     free_csd_surfaces(window);
     free_csd_buffers(window);
     if (decs.shadow_tile.data) free(decs.shadow_tile.data);
@@ -894,24 +1051,17 @@ on_titlebar_buffer_released(_GLFWwindow *window) {
 
 void
 csd_set_window_geometry(_GLFWwindow *window, int32_t *width, int32_t *height) {
-    const bool include_space_for_csd = csd_should_window_be_decorated(window);
-    const bool has_titlebar = include_space_for_csd && !decs.titlebar_hidden;
     bool size_specified_by_compositor = *width > 0 && *height > 0;
     if (!size_specified_by_compositor) {
         *width = window->wl.user_requested_content_size.width;
         *height = window->wl.user_requested_content_size.height;
         if (window->wl.xdg.top_level_bounds.width > 0) *width = MIN(*width, window->wl.xdg.top_level_bounds.width);
         if (window->wl.xdg.top_level_bounds.height > 0) *height = MIN(*height, window->wl.xdg.top_level_bounds.height);
-        if (has_titlebar) *height += decs.metrics.visible_titlebar_height;
     }
     decs.geometry.x = 0;
     decs.geometry.y = 0;
     decs.geometry.width = *width;
     decs.geometry.height = *height;
-    if (has_titlebar) {
-        decs.geometry.y = -decs.metrics.visible_titlebar_height;
-        *height -= decs.metrics.visible_titlebar_height;
-    }
 }
 
 bool
@@ -925,8 +1075,8 @@ csd_set_titlebar_color(_GLFWwindow *window, uint32_t color, bool use_system_colo
 #define x window->wl.allCursorPosX
 #define y window->wl.allCursorPosY
 
-static void
-set_cursor(GLFWCursorShape shape, _GLFWwindow *window) {
+void
+_glfwWaylandSetCursorShape(GLFWCursorShape shape, _GLFWwindow *window) {
     if (_glfw.wl.wp_cursor_shape_device_v1) {
         wayland_cursor_shape s = glfw_cursor_shape_to_wayland_cursor_shape(shape);
         if (s.which > -1) {
@@ -1012,6 +1162,13 @@ handle_pointer_leave(_GLFWwindow *window, struct wl_surface *surface) {
         c(minimize);
         c(maximize);
         c(close);
+        // Hide whenever the pointer leaves the pop-over. Where it went cannot be
+        // known here, and a fast flick out of the window does not leave a motion
+        // event near the edge it crossed, so guessing from the last position
+        // misses exactly the case that matters. If it landed back on the content
+        // the enter there re-reveals it, which is now just an attach away. The
+        // subsurfaces are synchronized, so this needs a commit on the parent.
+        if (csd_set_titlebar_revealed(window, false)) commit_window_surface_if_safe(window);
     }
 #undef c
     decs.focus = CENTRAL_WINDOW;
@@ -1030,16 +1187,23 @@ handle_pointer_move(_GLFWwindow *window) {
                 if (window->wl.xdg.toplevel) xdg_toplevel_move(window->wl.xdg.toplevel, _glfw.wl.seat, _glfw.wl.pointer_serial);
             } else if (update_hovered_button(window)) cursorShape = GLFW_POINTER_CURSOR;
         } break;
-        case CSD_shadow_top: cursorShape = GLFW_N_RESIZE_CURSOR; break;
+        case CSD_shadow_top:
+            // The top edge drags the window rather than resizing it, so it
+            // shows a grab cursor rather than a resize arrow.
+            cursorShape = decs.dragging ? GLFW_GRABBING_CURSOR : GLFW_GRAB_CURSOR;
+            if (decs.dragging && window->wl.xdg.toplevel) xdg_toplevel_move(window->wl.xdg.toplevel, _glfw.wl.seat, _glfw.wl.pointer_serial);
+            break;
         case CSD_shadow_bottom: cursorShape = GLFW_S_RESIZE_CURSOR; break;
         case CSD_shadow_left: cursorShape = GLFW_W_RESIZE_CURSOR; break;
         case CSD_shadow_right: cursorShape = GLFW_E_RESIZE_CURSOR; break;
         case CSD_shadow_upper_left: cursorShape = GLFW_NW_RESIZE_CURSOR; break;
-        case CSD_shadow_upper_right: cursorShape = GLFW_NE_RESIZE_CURSOR; break;
+        // The top right corner sits under the window controls, so it neither
+        // resizes nor drags: doing either there fights with the buttons.
+        case CSD_shadow_upper_right: break;
         case CSD_shadow_lower_left: cursorShape = GLFW_SW_RESIZE_CURSOR; break;
         case CSD_shadow_lower_right: cursorShape = GLFW_SE_RESIZE_CURSOR; break;
     }
-    if (_glfw.wl.cursorPreviousShape != cursorShape) set_cursor(cursorShape, window);
+    if (_glfw.wl.cursorPreviousShape != cursorShape) _glfwWaylandSetCursorShape(cursorShape, window);
 }
 
 static void
@@ -1055,7 +1219,10 @@ perform_titlebar_action(_GLFWwindow *window, GLFWTitlebarAction action) {
         case TITLEBAR_ACTION_MENU:
             if (!window->wl.xdg.toplevel) break;
             if (window->wl.wm_capabilities.window_menu)
-                xdg_toplevel_show_window_menu(window->wl.xdg.toplevel, _glfw.wl.seat, _glfw.wl.pointer_serial, (int32_t)x, (int32_t)y - decs.metrics.top);
+                // x and y are relative to the pop-over, which sits at the top
+                // right of the content, and the window geometry starts at 0,0.
+                xdg_toplevel_show_window_menu(
+                    window->wl.xdg.toplevel, _glfw.wl.seat, _glfw.wl.pointer_serial, (int32_t)(window->wl.width - (int)popover_width(window) + x), (int32_t)y);
             else _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland compositor does not support showing window menu");
             break;
         case TITLEBAR_ACTION_MAXIMIZE:
@@ -1101,6 +1268,15 @@ handle_pointer_button(_GLFWwindow *window, uint32_t button, uint32_t state) {
                     }
                 }
                 decs.dragging = !has_hovered_button(window);
+                break;
+            // The top right corner sits under the window controls, so it
+            // neither resizes nor drags: doing either there fights with them.
+            case CSD_shadow_upper_right: break;
+            case CSD_shadow_top:
+                if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+                    decs.dragging = true;
+                    if (window->wl.xdg.toplevel) xdg_toplevel_move(window->wl.xdg.toplevel, _glfw.wl.seat, _glfw.wl.pointer_serial);
+                } else decs.dragging = false;
                 break;
             default: edges = decoration_resize_edges(decs.focus); break;
         }
@@ -1152,6 +1328,7 @@ csd_handle_touch_down(_GLFWwindow *window, struct wl_surface *surface, int32_t i
     const _GLFWCSDSurface which = decoration_surface(window, surface);
     if (which == CENTRAL_WINDOW) return false;
     const GLFWTitlebarButton button = which == CSD_titlebar ? titlebar_button_at(window, sx, sy) : TITLEBAR_BUTTON_NONE;
+    if (which == CSD_shadow_upper_right) return true; // under the controls, see handle_pointer_button()
     if (button == TITLEBAR_BUTTON_NONE) {
         // Interactive requests require this contact's original down serial.
         // The contact is not tracked as the compositor takes it over and need
