@@ -2052,7 +2052,8 @@ create_os_window(PyObject UNUSED *self, PyObject *args, PyObject *kw) {
         PyErr_SetString(PyExc_ValueError, "Too many windows");
         return NULL;
     }
-    bool want_semi_transparent = (1.0 - OPT(background_opacity) >= 0.01) || OPT(dynamic_background_opacity);
+    bool want_semi_transparent =
+        (1.0 - OPT(background_opacity) >= 0.01) || OPT(dynamic_background_opacity) || (global_state.is_wayland && !OPT(hide_window_decorations));
     glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, want_semi_transparent);
     uint32_t bgcolor = OPT(background);
     uint32_t bgalpha = (uint32_t)((MAX(0.f, MIN((OPT(background_opacity) * 255), 255.f))));
