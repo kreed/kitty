@@ -14,10 +14,12 @@ from typing import TYPE_CHECKING, Any, DefaultDict, Optional, TypedDict
 import kitty.fast_data_types as fast_data_types
 
 from .constants import handled_signals, is_freebsd, is_macos, kitten_exe, kitty_base_dir, shell_path, terminfo_dir
+from .host_spawn import HostSpawnError, agent_exe, host_agent, host_env, should_run_on_host, translate_path
 from .types import run_once
 from .utils import cmdline_for_hold, log_error, resolved_shell, which
 
 if TYPE_CHECKING:
+    from .host_spawn import Foreground
     from .window import CwdRequest
 
 
@@ -327,6 +329,9 @@ class Child:
     pid: int | None = None
     initial_termios_state: list[Any] | None = None
     forked = False
+    # Non None when the child runs on the host outside the Flatpak sandbox, in
+    # which case it identifies the process to the host agent. See host_spawn.py.
+    host_token: int | None = None
 
     def __init__(
         self,
@@ -427,29 +432,10 @@ class Child:
                     must_run_startup_command_via_kitten = True  # unknown shell
         return env, must_run_startup_command_via_kitten
 
-    def fork(self) -> int | None:
-        if self.forked:
-            return None
+    def finalize_argv(self, must_run_startup_command_via_kitten: bool, pass_fds: Sequence[int]) -> tuple[list[str], str]:
         opts = fast_data_types.get_options()
-        self.forked = True
-        master, slave = openpty()
-        stdin, self.stdin = self.stdin, None
-        ready_read_fd, ready_write_fd = os.pipe()
-        os.set_inheritable(ready_write_fd, False)
-        os.set_inheritable(ready_read_fd, True)
-        if stdin is not None:
-            stdin_read_fd, stdin_write_fd = os.pipe()
-            os.set_inheritable(stdin_write_fd, False)
-            os.set_inheritable(stdin_read_fd, True)
-        else:
-            stdin_read_fd = stdin_write_fd = -1
-        self.final_env, must_run_startup_command_via_kitten = self.get_final_env()
-        self.initial_termios_state = termios.tcgetattr(master)
         argv = list(self.argv)
         cwd = self.cwd
-        pass_fds = self.pass_fds
-        if self.remote_control_fd > -1:
-            pass_fds += (self.remote_control_fd,)
         if self.should_run_via_run_shell_kitten or must_run_startup_command_via_kitten:
             # bash will only source ~/.bash_profile if it detects it is a login
             # shell (see the invocation section of the bash man page), which it
@@ -488,11 +474,108 @@ class Child:
                     argv.append('--cwd=' + cwd)
                     cwd = os.path.expanduser('~')
                 argv = ['/usr/bin/login', '-f', '-l', '-p', user] + argv
-        self.final_exe = final_exe = which(argv[0]) or argv[0]
         self.final_argv0 = argv[0]
         if self.hold:
             argv = cmdline_for_hold(argv)
-            final_exe = argv[0]
+        return argv, cwd
+
+    def fork(self) -> int | None:
+        if self.forked:
+            return None
+        self.forked = True
+        stdin, self.stdin = self.stdin, None
+        self.final_env, must_run_startup_command_via_kitten = self.get_final_env()
+        pass_fds = self.pass_fds
+        if self.remote_control_fd > -1:
+            pass_fds += (self.remote_control_fd,)
+        # Decided from the requested command, not the wrapped one, so that the
+        # shell integration and --hold wrappers follow it to the host.
+        on_host = should_run_on_host(self.argv, self.pass_fds, self.remote_control_fd)
+        argv, cwd = self.finalize_argv(must_run_startup_command_via_kitten, pass_fds)
+        if on_host:
+            pid = self.fork_on_host(argv, cwd, stdin)
+            if pid is not None:
+                return pid
+            # The host is unreachable, a sandboxed child is better than none.
+        return self.fork_in_sandbox(argv, cwd, stdin, pass_fds)
+
+    def fork_on_host(self, argv: list[str], cwd: str, stdin: bytes | None) -> int | None:
+        """Run the child on the host, outside the Flatpak sandbox.
+
+        The PTY is created on the host by ptyxis-agent and handed to us, so
+        ``child_fd`` below is a genuine host PTY. The process itself has no PID
+        we can see, so a stub process holding the other end of an exit pipe
+        stands in for it and dies with the same status, which keeps the rest of
+        kitty (reaping, close-on-child-death, hangup) working unchanged.
+        """
+        agent = host_agent()
+        if agent is None:
+            return None
+        exit_read_fd, exit_write_fd = os.pipe()
+        stdin_read_fd = stdin_write_fd = -1
+        pty_fd = -1
+        token: int | None = None
+        try:
+            if stdin is not None:
+                stdin_read_fd, stdin_write_fd = os.pipe()
+            token, pty_fd = agent.spawn(
+                [translate_path(x) for x in argv],
+                translate_path(cwd),
+                host_env(self.final_env, process_env()),
+                exit_write_fd,
+                stdin_read_fd,
+            )
+            exe = agent_exe()
+            pid = os.posix_spawn(
+                exe,
+                [exe, '--wait-fd=3'],
+                {},
+                file_actions=((os.POSIX_SPAWN_DUP2, exit_read_fd, 3),),
+                setpgroup=0,
+            )
+        except (HostSpawnError, OSError) as err:
+            log_error(f'Could not run child on the host, falling back to the sandbox: {err}')
+            for fd in (pty_fd, stdin_write_fd):
+                if fd > -1:
+                    os.close(fd)
+            if token is not None:
+                with suppress(Exception):
+                    agent.release(token)
+            return None
+        finally:
+            os.close(exit_read_fd)
+            os.close(exit_write_fd)
+            if stdin_read_fd > -1:
+                os.close(stdin_read_fd)
+        self.host_token = token
+        self.pid = pid
+        self.child_fd = pty_fd
+        self.final_exe = argv[0]
+        fast_data_types.set_iutf8_fd(pty_fd, True)
+        self.initial_termios_state = termios.tcgetattr(pty_fd)
+        if stdin is not None:
+            fast_data_types.thread_write(stdin_write_fd, stdin)
+        # Host children cannot wait on the terminal-ready pipe, they start
+        # writing immediately. The PTY buffers that until kitty starts reading.
+        self.terminal_ready_fd = os.open(os.devnull, os.O_WRONLY)
+        os.set_blocking(pty_fd, False)
+        # The agent already places host processes in their own systemd scope.
+        return pid
+
+    def fork_in_sandbox(self, argv: list[str], cwd: str, stdin: bytes | None, pass_fds: tuple[int, ...]) -> int | None:
+        opts = fast_data_types.get_options()
+        master, slave = openpty()
+        ready_read_fd, ready_write_fd = os.pipe()
+        os.set_inheritable(ready_write_fd, False)
+        os.set_inheritable(ready_read_fd, True)
+        if stdin is not None:
+            stdin_read_fd, stdin_write_fd = os.pipe()
+            os.set_inheritable(stdin_write_fd, False)
+            os.set_inheritable(stdin_read_fd, True)
+        else:
+            stdin_read_fd = stdin_write_fd = -1
+        self.initial_termios_state = termios.tcgetattr(master)
+        self.final_exe = final_exe = which(argv[0]) or argv[0]
         env = tuple(f'{k}={v}' for k, v in self.final_env.items())
         pid = fast_data_types.spawn(
             final_exe,
@@ -557,10 +640,47 @@ class Child:
             ans['cwd'] = cwd_of_process(pid) or None
         return ans
 
+    def host_foreground(self) -> Optional['Foreground']:
+        """Ask the host agent about the foreground process on our PTY.
+
+        The sandbox has its own PID namespace, so /proc tells us nothing about
+        host children; the agent looks on our behalf.
+        """
+        if self.host_token is None or self.child_fd is None:
+            return None
+        agent = host_agent()
+        if agent is None:
+            return None
+        with suppress(Exception):
+            return agent.foreground(self.host_token, self.child_fd)
+        return None
+
+    def host_cwd(self) -> str | None:
+        if self.host_token is None or self.child_fd is None:
+            return None
+        agent = host_agent()
+        if agent is None:
+            return None
+        with suppress(Exception):
+            return agent.cwd(self.host_token, self.child_fd) or None
+        return None
+
     @property
     def foreground_processes(self) -> list[ProcessDesc]:
         if self.child_fd is None:
             return []
+        if self.host_token is not None:
+            fg = self.host_foreground()
+            if fg is None:
+                return []
+            cmdline = fg.cmdline.split() or list(self.argv)
+            if not fg.has_foreground_process:
+                # The child itself is in the foreground. Report it under the
+                # pid kitty knows it by so callers can recognise the root. Its
+                # cmdline can still differ from argv, a shell started with -c
+                # execs the last command in place.
+                return [{'pid': self.pid or -1, 'cmdline': cmdline, 'cwd': self.host_cwd()}]
+            return [{'pid': fg.pid, 'cmdline': cmdline, 'cwd': self.host_cwd()}]
         try:
             pgrp = os.tcgetpgrp(self.child_fd)
             foreground_processes = processes_in_group(pgrp) if pgrp >= 0 else []
@@ -570,7 +690,9 @@ class Child:
 
     @property
     def background_processes(self) -> list[ProcessDesc]:
-        if self.child_fd is None:
+        if self.child_fd is None or self.host_token is not None:
+            # The agent has no way to enumerate the other groups in the host
+            # session, and /proc in the sandbox cannot see them.
             return []
         try:
             foreground_process_group_id = os.tcgetpgrp(self.child_fd)
@@ -591,6 +713,9 @@ class Child:
 
     @property
     def cmdline(self) -> list[str]:
+        if self.host_token is not None:
+            # self.pid is the local stub, not the host process.
+            return list(self.argv)
         try:
             assert self.pid is not None
             return self.cmdline_of_pid(self.pid) or list(self.argv)
@@ -599,6 +724,11 @@ class Child:
 
     @property
     def foreground_cmdline(self) -> list[str]:
+        if self.host_token is not None:
+            fg = self.host_foreground()
+            if fg is not None and fg.cmdline.split():
+                return fg.cmdline.split()
+            return self.cmdline
         try:
             assert self.pid_for_cwd is not None
             return self.cmdline_of_pid(self.pid_for_cwd) or self.cmdline
@@ -607,6 +737,8 @@ class Child:
 
     @property
     def environ(self) -> dict[str, str]:
+        if self.host_token is not None:
+            return self.final_env.copy()
         try:
             assert self.pid is not None
             return environ_of_process(self.pid) or self.final_env.copy()
@@ -615,12 +747,18 @@ class Child:
 
     @property
     def current_cwd(self) -> str | None:
+        if self.host_token is not None:
+            return self.host_cwd()
         with suppress(Exception):
             assert self.pid is not None
             return cwd_of_process(self.pid)
         return None
 
     def get_pid_for_cwd(self, oldest: bool = False) -> int | None:
+        if self.host_token is not None:
+            # Host pids are meaningless in the sandbox, callers use this to
+            # address the process locally.
+            return self.pid
         with suppress(Exception):
             assert self.child_fd is not None
             pgrp = os.tcgetpgrp(self.child_fd)
@@ -644,6 +782,8 @@ class Child:
         return self.get_pid_for_cwd()
 
     def get_foreground_cwd(self, oldest: bool = False) -> str | None:
+        if self.host_token is not None:
+            return self.host_cwd()
         with suppress(Exception):
             pid = self.get_pid_for_cwd(oldest)
             if pid is not None:
@@ -651,6 +791,9 @@ class Child:
         return None
 
     def get_foreground_exe(self, oldest: bool = False) -> str | None:
+        if self.host_token is not None:
+            c = self.foreground_cmdline
+            return c[0] if c else None
         with suppress(Exception):
             pid = self.get_pid_for_cwd(oldest)
             if pid is not None:
@@ -665,6 +808,8 @@ class Child:
 
     @property
     def foreground_environ(self) -> dict[str, str]:
+        if self.host_token is not None:
+            return self.final_env.copy()
         pid = self.pid_for_cwd
         if pid is not None:
             with suppress(Exception):
@@ -675,10 +820,29 @@ class Child:
                 return environ_of_process(pid)
         return {}
 
+    def signal_child(self, *signals: int) -> None:
+        if self.host_token is not None:
+            agent = host_agent()
+            if agent is not None:
+                for sig in signals:
+                    with suppress(Exception):
+                        agent.signal(self.host_token, sig)
+            return
+        pid = self.pid_for_cwd
+        if pid is not None:
+            for sig in signals:
+                os.kill(pid, sig)
+
     def send_signal_for_key(self, key_num: bytes) -> bool:
         import signal
 
         if self.child_fd is None:
+            return False
+        if self.host_token is not None:
+            # The foreground process group lives in the host's PID namespace so
+            # we cannot signal it directly. Returning False makes kitty write
+            # the key to the PTY instead, and the host line discipline raises
+            # the signal itself, which is what we want anyway.
             return False
         t = termios.tcgetattr(self.child_fd)
         if not t[3] & termios.ISIG:
@@ -704,6 +868,8 @@ class Child:
                 pass
 
     def get_memory_used_by_child(self) -> int:
-        if self.pid is None:
+        if self.pid is None or self.host_token is not None:
+            # For host children self.pid is only the lifetime stub, whose
+            # memory usage says nothing about the actual process tree.
             return -1
         return memory_used_by_process_tree_rooted_at(self.pid, check_if_cgroup_root=False)
