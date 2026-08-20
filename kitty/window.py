@@ -2890,10 +2890,7 @@ class Window:
         """,
     )
     def signal_child(self, *signals: int) -> None:
-        pid = self.child.pid_for_cwd
-        if pid is not None:
-            for sig in signals:
-                os.kill(pid, sig)
+        self.child.signal_child(*signals)
 
     @ac(
         'misc',
